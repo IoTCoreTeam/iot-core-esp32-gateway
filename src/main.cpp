@@ -22,6 +22,22 @@ const char* gateway_secret = "x8z93-secure-key-abc"; // Change this!
 const char* node_id = "node-001"; // Environmental Node
 const char* node_name = "Environmental Node";
 
+// Per-gateway node whitelist (edit per device)
+const char* allowed_node_ids[] = { "node-001", "node-002" };
+const size_t allowed_node_count = sizeof(allowed_node_ids) / sizeof(allowed_node_ids[0]);
+
+bool isNodeWhitelisted(const char* nodeId) {
+    if (!nodeId) {
+        return false;
+    }
+    for (size_t i = 0; i < allowed_node_count; i++) {
+        if (strcmp(allowed_node_ids[i], nodeId) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // NTP Server for timestamps
 const char* ntpServer = "pool.ntp.org";
 const long gmtOffset_sec = 25200; // GMT+7 (Vietnam)
@@ -216,6 +232,11 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     
     memcpy(&myData, incomingData, sizeof(myData));
     String nodeMac = formatMac(mac);
+
+    if (!isNodeWhitelisted(myData.node_id)) {
+        Serial.printf("âœ— Node not in whitelist: %s\n", myData.node_id);
+        return;
+    }
     
     Serial.printf("Device: %s\n", myData.device_id);
     Serial.printf("Node: %s\n", myData.node_id);
