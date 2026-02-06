@@ -8,23 +8,118 @@
 #include <time.h>
 
 // WiFi & MQTT Config
-const char* ssid = "OrsCorp";
-const char* password = "Tamchiduc68";
-const char* mqtt_server = "192.168.1.230";
+#if defined(WIFI_PROFILE_HOME)
+#define WIFI_SSID "Tien Thuat"
+#define WIFI_PASSWORD "07112004tien"
+#elif defined(WIFI_PROFILE_OFFICE)
+#define WIFI_SSID "OrsCorp"
+#define WIFI_PASSWORD "Tamchiduc68"
+#endif
+
+#ifndef WIFI_SSID
+#define WIFI_SSID "OrsCorp"
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD "Tamchiduc68"
+#endif
+#ifndef MQTT_SERVER
+#define MQTT_SERVER "192.168.1.249"
+#endif
+
+const char* ssid = WIFI_SSID;
+const char* password = WIFI_PASSWORD;
+const char* mqtt_server = MQTT_SERVER;
 
 // Security: Gateway Credentials
-const char* gateway_id = "GW_001";
-const char* gateway_secret = "x8z93-secure-key-abc"; // Change this!
+#ifndef GATEWAY_ID
+#define GATEWAY_ID "GW_001"
+#endif
+#ifndef GATEWAY_SECRET
+#define GATEWAY_SECRET "x8z93-secure-key-abc"
+#endif
+
+const char* gateway_id = GATEWAY_ID;
+const char* gateway_secret = GATEWAY_SECRET; // Change this!
 
 // ESP32 Gateway - Updated Ä‘á»ƒ gá»­i node_id trong payload
 
 // THÃŠM: Node configuration
-const char* node_id = "node-001"; // Environmental Node
-const char* node_name = "Environmental Node";
+#ifndef NODE_ID
+#define NODE_ID "node-sensor-001"
+#endif
+#ifndef NODE_NAME
+#define NODE_NAME "Environmental Node"
+#endif
+
+const char* node_id = NODE_ID; // Environmental Node
+const char* node_name = NODE_NAME;
+
+// Message types
+const uint8_t MSG_TYPE_DATA = 1;
+const uint8_t MSG_TYPE_HEARTBEAT = 2;
+
+// Relay control action
+const char* ACTION_RELAY_CONTROL = "relay_control";
 
 // Per-gateway node whitelist (edit per device)
-const char* allowed_node_ids[] = { "node-001", "node-002" };
+#if defined(GATEWAY_3)
+const char* allowed_node_ids[] = { "node-sensor-003" };
+#elif defined(GATEWAY_2)
+const char* allowed_node_ids[] = { "node-sensor-002" };
+#else
+const char* allowed_node_ids[] = { "node-sensor-001", "node-control-001" };
+#endif
 const size_t allowed_node_count = sizeof(allowed_node_ids) / sizeof(allowed_node_ids[0]);
+
+#ifndef CONTROL_NODE_ID
+#define CONTROL_NODE_ID "node-control-001"
+#endif
+
+#ifndef CONTROL_NODE_MAC_0
+#define CONTROL_NODE_MAC_0 0x00
+#endif
+#ifndef CONTROL_NODE_MAC_1
+#define CONTROL_NODE_MAC_1 0x70
+#endif
+#ifndef CONTROL_NODE_MAC_2
+#define CONTROL_NODE_MAC_2 0x07
+#endif
+#ifndef CONTROL_NODE_MAC_3
+#define CONTROL_NODE_MAC_3 0xE6
+#endif
+#ifndef CONTROL_NODE_MAC_4
+#define CONTROL_NODE_MAC_4 0xB6
+#endif
+#ifndef CONTROL_NODE_MAC_5
+#define CONTROL_NODE_MAC_5 0x7C
+#endif
+
+uint8_t controlNodeAddress[] = {
+    CONTROL_NODE_MAC_0,
+    CONTROL_NODE_MAC_1,
+    CONTROL_NODE_MAC_2,
+    CONTROL_NODE_MAC_3,
+    CONTROL_NODE_MAC_4,
+    CONTROL_NODE_MAC_5
+};
+
+typedef struct control_command_message {
+    char gateway_id[32];
+    char node_id[32];
+    char action_type[24];
+    char device[16];
+    char state[8];
+    uint32_t command_seq;
+} control_command_message;
+
+static uint32_t controlCommandSeq = 0;
+static bool espNowReady = false;
+
+String getISOTimestamp();
+extern PubSubClient client;
+bool ensureEspNowReady();
+bool addControlNodePeer();
+void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len);
 
 bool isNodeWhitelisted(const char* nodeId) {
     if (!nodeId) {
@@ -38,14 +133,148 @@ bool isNodeWhitelisted(const char* nodeId) {
     return false;
 }
 
-// NTP Server for timestamps
-const char* ntpServer = "pool.ntp.org";
+bool isControlNode(const char* nodeId) {
+    if (!nodeId) {
+        return false;
+    }
+    return strncmp(nodeId, "node-control-", 13) == 0;
+}
+
+bool ensureEspNowReady() {
+    esp_err_t initResult = esp_now_init();
+    if (initResult != ESP_OK && initResult != ESP_ERR_ESPNOW_EXIST) {
+        Serial.printf("ESP-NOW init error: %d\n", initResult);
+        espNowReady = false;
+        return false;
+    }
+
+    esp_now_register_recv_cb(OnDataRecv);
+    espNowReady = true;
+
+#ifndef GATEWAY_2
+    addControlNodePeer();
+#endif
+    return true;
+}
+
+bool addControlNodePeer() {
+#ifdef GATEWAY_2
+    return false;
+#else
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, controlNodeAddress, 6);
+    peerInfo.channel = 0;
+    peerInfo.encrypt = false;
+    peerInfo.ifidx = WIFI_IF_STA;
+
+    if (esp_now_is_peer_exist(controlNodeAddress)) {
+        return true;
+    }
+
+    if (esp_now_add_peer(&peerInfo) != ESP_OK) {
+        Serial.println("Failed to add control-node ESP-NOW peer");
+        return false;
+    }
+
+    Serial.println("Control-node peer ready");
+    return true;
+#endif
+}
+
+void publishControlAck(const char* nodeId, const char* device, const char* state, const char* status) {
+    if (!client.connected()) {
+        return;
+    }
+
+    StaticJsonDocument<256> ackDoc;
+    ackDoc["gateway_id"] = gateway_id;
+    ackDoc["node_id"] = nodeId;
+    ackDoc["device"] = device;
+    ackDoc["state"] = state;
+    ackDoc["status"] = status;
+    ackDoc["timestamp"] = getISOTimestamp();
+
+    String ackPayload;
+    serializeJson(ackDoc, ackPayload);
+    client.publish("esp32/control/ack", ackPayload.c_str());
+}
+
+void sendControlCommandToNode(const char* targetNodeId, const char* device, const char* state) {
+#ifdef GATEWAY_2
+    Serial.println("Relay control ignored: gateway 2 has no control node");
+    publishControlAck(targetNodeId, device, state, "unsupported_gateway");
+#else
+    if (!ensureEspNowReady()) {
+        publishControlAck(targetNodeId, device, state, "espnow_not_ready");
+        return;
+    }
+
+    if (!targetNodeId || strlen(targetNodeId) == 0) {
+        targetNodeId = CONTROL_NODE_ID;
+    }
+    if (strcmp(targetNodeId, CONTROL_NODE_ID) != 0) {
+        Serial.printf("Relay control ignored: node mismatch %s\n", targetNodeId);
+        publishControlAck(targetNodeId, device, state, "node_mismatch");
+        return;
+    }
+
+    if (!addControlNodePeer()) {
+        publishControlAck(targetNodeId, device, state, "peer_add_failed");
+        return;
+    }
+
+    control_command_message command = {};
+    strncpy(command.gateway_id, gateway_id, sizeof(command.gateway_id) - 1);
+    strncpy(command.node_id, targetNodeId, sizeof(command.node_id) - 1);
+    strncpy(command.action_type, ACTION_RELAY_CONTROL, sizeof(command.action_type) - 1);
+    strncpy(command.device, device, sizeof(command.device) - 1);
+    strncpy(command.state, state, sizeof(command.state) - 1);
+    command.command_seq = ++controlCommandSeq;
+
+    esp_err_t result = esp_now_send(
+        controlNodeAddress,
+        reinterpret_cast<const uint8_t*>(&command),
+        sizeof(command)
+    );
+
+    if (result == ESP_OK) {
+        Serial.printf("Relay command sent: node=%s device=%s state=%s seq=%lu\n",
+                      targetNodeId, device, state, (unsigned long)command.command_seq);
+        publishControlAck(targetNodeId, device, state, "dispatched");
+    } else {
+        Serial.printf("Relay command send failed (%d)\n", result);
+        publishControlAck(targetNodeId, device, state, "dispatch_failed");
+    }
+#endif
+}
+
+// NTP Servers for timestamps (fallbacks)
+const char* ntpServer1 = "pool.ntp.org";
+const char* ntpServer2 = "time.google.com";
+const char* ntpServer3 = "time.cloudflare.com";
 const long gmtOffset_sec = 25200; // GMT+7 (Vietnam)
 const int daylightOffset_sec = 0;
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 Servo myServo;
+
+const uint32_t WIFI_RECONNECT_BASE_MS = 1000;
+const uint32_t WIFI_RECONNECT_MAX_MS = 30000;
+
+static bool wifiEverConnected = false;
+static bool wifiAttemptInProgress = false;
+static unsigned long lastWiFiAttemptMs = 0;
+static uint32_t wifiBackoffMs = WIFI_RECONNECT_BASE_MS;
+static uint8_t lastDisconnectReason = 0;
+static unsigned long lastDisconnectAt = 0;
+
+// Forward declarations
+bool ensureWiFiConnected(uint32_t timeoutMs = 10000);
+void startWiFiAttempt();
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
+const char* wifiDisconnectReasonToString(uint8_t reason);
+String getISOTimestamp();
 
 typedef struct struct_message {
     char device_id[32];
@@ -71,6 +300,9 @@ typedef struct struct_message {
     unsigned long sensor_timestamp;
     int rssi;
     bool dht_error;
+    uint8_t message_type;
+    uint32_t uptime_sec;
+    uint32_t heartbeat_seq;
 } struct_message;
 
 struct_message myData;
@@ -80,6 +312,78 @@ String formatMac(const uint8_t *mac) {
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return String(buf);
+}
+
+const char* wifiDisconnectReasonToString(uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_AUTH_EXPIRE: return "AUTH_EXPIRE";
+        case WIFI_REASON_AUTH_LEAVE: return "AUTH_LEAVE";
+        case WIFI_REASON_ASSOC_EXPIRE: return "ASSOC_EXPIRE";
+        case WIFI_REASON_ASSOC_TOOMANY: return "ASSOC_TOOMANY";
+        case WIFI_REASON_NOT_AUTHED: return "NOT_AUTHED";
+        case WIFI_REASON_NOT_ASSOCED: return "NOT_ASSOCED";
+        case WIFI_REASON_ASSOC_LEAVE: return "ASSOC_LEAVE";
+        case WIFI_REASON_BEACON_TIMEOUT: return "BEACON_TIMEOUT";
+        case WIFI_REASON_NO_AP_FOUND: return "NO_AP_FOUND";
+        case WIFI_REASON_AUTH_FAIL: return "AUTH_FAIL";
+        case WIFI_REASON_ASSOC_FAIL: return "ASSOC_FAIL";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT: return "HANDSHAKE_TIMEOUT";
+        case WIFI_REASON_CONNECTION_FAIL: return "CONNECTION_FAIL";
+        default: return "UNKNOWN";
+    }
+}
+
+void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+    switch (event) {
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+            Serial.println("WiFi STA connected to AP");
+            break;
+        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+            wifiAttemptInProgress = false;
+            wifiEverConnected = true;
+            wifiBackoffMs = WIFI_RECONNECT_BASE_MS;
+            Serial.printf("WiFi connected: IP=%s RSSI=%d dBm\n",
+                          WiFi.localIP().toString().c_str(), WiFi.RSSI());
+            break;
+        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+            wifiAttemptInProgress = false;
+            espNowReady = false;
+            lastDisconnectReason = info.wifi_sta_disconnected.reason;
+            lastDisconnectAt = millis();
+            Serial.printf("WiFi disconnected (reason=%u %s)\n",
+                          lastDisconnectReason,
+                          wifiDisconnectReasonToString(lastDisconnectReason));
+            break;
+        default:
+            break;
+    }
+}
+
+void startWiFiAttempt() {
+    if (WiFi.status() == WL_CONNECTED) {
+        return;
+    }
+    if (wifiAttemptInProgress) {
+        return;
+    }
+
+    unsigned long now = millis();
+    if (now - lastWiFiAttemptMs < wifiBackoffMs) {
+        return;
+    }
+
+    lastWiFiAttemptMs = now;
+    wifiAttemptInProgress = true;
+    Serial.printf("WiFi reconnect attempt (backoff %lu ms)\n", (unsigned long)wifiBackoffMs);
+
+    if (!wifiEverConnected) {
+        WiFi.begin(ssid, password);
+    } else {
+        WiFi.reconnect();
+    }
+
+    uint32_t nextBackoff = wifiBackoffMs * 2;
+    wifiBackoffMs = min(nextBackoff, WIFI_RECONNECT_MAX_MS);
 }
 
 // Get ISO 8601 timestamp
@@ -93,12 +397,15 @@ String getISOTimestamp() {
     return String(buffer) + "Z";
 }
 
-bool syncTime(uint32_t timeoutMs = 15000) {
-    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+bool syncTime(uint32_t timeoutMs = 30000) {
+    if (!ensureWiFiConnected()) {
+        return false;
+    }
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer1, ntpServer2, ntpServer3);
     struct tm timeinfo;
     uint32_t start = millis();
     while (millis() - start < timeoutMs) {
-        if (getLocalTime(&timeinfo, 1000)) {
+        if (getLocalTime(&timeinfo, 2000)) {
             if (timeinfo.tm_year >= (2016 - 1900)) {
                 return true;
             }
@@ -108,23 +415,20 @@ bool syncTime(uint32_t timeoutMs = 15000) {
     return false;
 }
 
-bool ensureWiFiConnected(uint32_t timeoutMs = 10000) {
+bool ensureWiFiConnected(uint32_t timeoutMs) {
     if (WiFi.status() == WL_CONNECTED) {
         return true;
     }
-    Serial.println("WiFi disconnected, reconnecting...");
-    WiFi.disconnect();
-    WiFi.begin(ssid, password);
+
+    startWiFiAttempt();
     uint32_t start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < timeoutMs) {
+        startWiFiAttempt();
         delay(250);
-        Serial.print(".");
     }
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("\nWiFi reconnected");
         return true;
     }
-    Serial.println("\nWiFi reconnect failed");
     return false;
 }
 
@@ -218,6 +522,23 @@ void callback(char* topic, byte* payload, unsigned int length) {
             String ackPayload;
             serializeJson(ackDoc, ackPayload);
             client.publish("esp32/servo/ack", ackPayload.c_str());
+        } else if (action == ACTION_RELAY_CONTROL) {
+            String device = doc["device"] | "";
+            String state = doc["state"] | "";
+            String targetNode = doc["node_id"] | CONTROL_NODE_ID;
+
+            if (device != "pump" && device != "light") {
+                Serial.println("relay_control invalid device");
+                publishControlAck(targetNode.c_str(), device.c_str(), state.c_str(), "invalid_device");
+                return;
+            }
+            if (state != "on" && state != "off") {
+                Serial.println("relay_control invalid state");
+                publishControlAck(targetNode.c_str(), device.c_str(), state.c_str(), "invalid_state");
+                return;
+            }
+
+            sendControlCommandToNode(targetNode.c_str(), device.c_str(), state.c_str());
         }
     }
     Serial.println("========================\n");
@@ -230,14 +551,69 @@ void callback(char* topic, byte* payload, unsigned int length) {
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     Serial.println("\n=== ESP-NOW Data Received ===");
     
-    memcpy(&myData, incomingData, sizeof(myData));
+    memset(&myData, 0, sizeof(myData));
+    int copyLen = len < (int)sizeof(myData) ? len : (int)sizeof(myData);
+    memcpy(&myData, incomingData, copyLen);
     String nodeMac = formatMac(mac);
 
-    if (!isNodeWhitelisted(myData.node_id)) {
-        Serial.printf("âœ— Node not in whitelist: %s\n", myData.node_id);
+    if (myData.message_type == MSG_TYPE_HEARTBEAT) {
+        if (!isNodeWhitelisted(myData.node_id)) {
+            Serial.printf("Node heartbeat from non-whitelisted node: %s\n", myData.node_id);
+        }
+        const bool controlNode = isControlNode(myData.node_id);
+        const char* heartbeatTopic = controlNode
+            ? "esp32/controllers/heartbeat"
+            : "esp32/nodes/heartbeat";
+
+        Serial.printf("Heartbeat from node: %s\n", myData.node_id);
+        Serial.printf("  Device: %s\n", myData.device_id);
+        Serial.printf("  Uptime: %lu s\n", (unsigned long)myData.uptime_sec);
+        Serial.printf("  RSSI: %d dBm\n", myData.rssi);
+
+        StaticJsonDocument<300> heartbeat;
+        heartbeat["type"] = "node_heartbeat";
+        heartbeat["gateway_id"] = gateway_id;
+        heartbeat["gateway_ip"] = WiFi.localIP().toString();
+        heartbeat["gateway_mac"] = WiFi.macAddress();
+        heartbeat["node_id"] = myData.node_id;
+        heartbeat["node_name"] = controlNode ? "Control Node" : "Sensor Node";
+        heartbeat["node_mac"] = nodeMac;
+        heartbeat["sensor_id"] = myData.device_id;
+        heartbeat["status"] = "online";
+        heartbeat["uptime"] = myData.uptime_sec;
+        heartbeat["heartbeat_seq"] = myData.heartbeat_seq;
+        heartbeat["sensor_rssi"] = myData.rssi;
+        heartbeat["gateway_timestamp"] = getISOTimestamp();
+        heartbeat["sensor_timestamp"] = myData.sensor_timestamp;
+
+        String hbPayload;
+        serializeJson(heartbeat, hbPayload);
+
+        if (client.connected()) {
+            bool published = client.publish(heartbeatTopic, hbPayload.c_str(), true);
+            if (published) {
+                Serial.println("Node heartbeat published to MQTT");
+            } else {
+                Serial.println("Node heartbeat publish failed");
+            }
+        } else {
+            Serial.println("MQTT disconnected, heartbeat not published");
+        }
+
+        Serial.println("=============================\n");
         return;
     }
-    
+
+    if (!isNodeWhitelisted(myData.node_id)) {
+        Serial.printf("Node not in whitelist (dropping sensor data): %s\n", myData.node_id);
+        return;
+    }
+
+    if (isControlNode(myData.node_id)) {
+        Serial.printf("Ignoring non-heartbeat payload from control node: %s\n", myData.node_id);
+        return;
+    }
+
     Serial.printf("Device: %s\n", myData.device_id);
     Serial.printf("Node: %s\n", myData.node_id);
     
@@ -263,13 +639,10 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     // Gateway info
     doc["gateway_id"] = gateway_id;
     doc["gateway_secret"] = gateway_secret;
-    doc["gateway_ip"] = WiFi.localIP().toString();
-    doc["gateway_mac"] = WiFi.macAddress();
     
     // Node info
     doc["node_id"] = myData.node_id;
-    doc["node_name"] = "Environmental Node";
-    doc["node_mac"] = nodeMac;
+    doc["node_name"] = "Sensor Node";
     
     // Device info
     doc["sensor_id"] = myData.device_id;
@@ -339,34 +712,28 @@ void setup() {
     
     // WiFi Setup
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect();
-    delay(100);
+    WiFi.setAutoReconnect(true);
+    WiFi.persistent(false);
+    WiFi.setSleep(false);
+    WiFi.onEvent(onWiFiEvent);
+    WiFi.disconnect(true, true);
+    delay(200);
     
-    // Initialize ESP-NOW first
-    Serial.println("[1/6] Initializing ESP-NOW...");
-    if (esp_now_init() != ESP_OK) {
-        Serial.println("âœ— ESP-NOW init failed!");
+    // Connect to WiFi first
+    Serial.println("[1/6] Connecting to WiFi...");
+    startWiFiAttempt();
+
+    if (!ensureWiFiConnected(20000)) {
+        Serial.println("âœ— WiFi connection failed!");
+        if (lastDisconnectReason != 0) {
+            Serial.printf("  Last reason: %u (%s)\n",
+                          lastDisconnectReason,
+                          wifiDisconnectReasonToString(lastDisconnectReason));
+        }
         return;
     }
-    esp_now_register_recv_cb(OnDataRecv);
-    Serial.println("âœ“ ESP-NOW ready");
-    
-    // Connect to WiFi
-    Serial.println("[2/6] Connecting to WiFi...");
-    WiFi.begin(ssid, password);
-    int attempts = 0;
-    while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-        delay(500);
-        Serial.print(".");
-        attempts++;
-    }
-    
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("\nâœ— WiFi connection failed!");
-        return;
-    }
-    
-    Serial.println("\nâœ“ WiFi connected");
+
+    Serial.println("âœ“ WiFi connected");
     Serial.print("  IP: ");
     Serial.println(WiFi.localIP());
     Serial.print("  Channel: ");
@@ -376,6 +743,14 @@ void setup() {
     
     // Disable power saving
     esp_wifi_set_ps(WIFI_PS_NONE);
+
+    // Initialize ESP-NOW after WiFi is up
+    Serial.println("[2/6] Initializing ESP-NOW...");
+    if (!ensureEspNowReady()) {
+        Serial.println("âœ— ESP-NOW init failed!");
+        return;
+    }
+    Serial.println("âœ“ ESP-NOW ready");
     
     // Initialize NTP for timestamps
     Serial.println("[3/6] Syncing time with NTP...");
@@ -413,6 +788,10 @@ void setup() {
 }
 
 void loop() {
+    if (WiFi.status() != WL_CONNECTED) {
+        startWiFiAttempt();
+    }
+
     static unsigned long lastMqttAttempt = 0;
     if (!client.connected()) {
         if (millis() - lastMqttAttempt >= 5000) {
@@ -423,9 +802,9 @@ void loop() {
         client.loop();
     }
     
-    // Heartbeat every 30 seconds
+    // Heartbeat every 5 seconds
     static unsigned long lastHeartbeat = 0;
-    if (millis() - lastHeartbeat > 30000) {
+    if (millis() - lastHeartbeat > 5000) {
         StaticJsonDocument<200> heartbeat;
         heartbeat["gateway_id"] = gateway_id;
         heartbeat["status"] = "online";
