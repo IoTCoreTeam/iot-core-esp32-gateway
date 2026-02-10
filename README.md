@@ -14,17 +14,21 @@ Home WiFi (`Tien Thuat`):
 - `gateway2-home` -> `GW_002`
 - `gateway3-home` -> `GW_003`
 
-## Node Mapping (Whitelist at Gateway)
-
-- `GW_001`: `node-sensor-001`, `node-control-001`
-- `GW_002`: `node-sensor-002`
-- `GW_003`: `node-sensor-003`
-
 ## Runtime Behavior
 
 - Node heartbeat is always forwarded to MQTT:
   - `esp32/nodes/heartbeat`
   - `esp32/controllers/heartbeat`
+- Gateway subscribes runtime whitelist from server:
+  - `esp32/whitelist/{gateway_id}`
+- Runtime whitelist input payload from server:
+  - `type`, `gateway_id`, `nodes[]`, `updated_at`
+- Runtime whitelist output in gateway:
+  - internal whitelist set used by `isNodeWhitelisted(...)`
+  - starts as `null` on boot (no hardcoded fallback in firmware)
+  - only nodes in `nodes[]` are accepted for sensor data
+  - if no successful whitelist sync is received for 60 seconds, runtime whitelist is reset to `null`
+  - each successful whitelist payload refreshes the 60-second timer
 - Node heartbeat payload includes:
   - `gateway_ip`, `gateway_mac`, `node_mac`
 - Sensor data is dropped when node is not whitelisted.

@@ -61,15 +61,13 @@ const uint8_t MSG_TYPE_HEARTBEAT = 2;
 // Relay control action
 const char* ACTION_RELAY_CONTROL = "relay_control";
 
-// Per-gateway node whitelist (edit per device)
-#if defined(GATEWAY_3)
-const char* allowed_node_ids[] = { "node-sensor-003" };
-#elif defined(GATEWAY_2)
-const char* allowed_node_ids[] = { "node-sensor-002" };
-#else
-const char* allowed_node_ids[] = { "node-sensor-001", "node-control-001" };
-#endif
-const size_t allowed_node_count = sizeof(allowed_node_ids) / sizeof(allowed_node_ids[0]);
+const size_t MAX_RUNTIME_WHITELIST_NODES = 16;
+const size_t MAX_NODE_ID_LEN = 31;
+const unsigned long RUNTIME_WHITELIST_TTL_MS = 60000UL;
+char runtime_whitelist_nodes[MAX_RUNTIME_WHITELIST_NODES][MAX_NODE_ID_LEN + 1];
+size_t runtime_whitelist_count = 0;
+bool runtime_whitelist_active = false;
+unsigned long runtime_whitelist_last_sync_ms = 0;
 
 #ifndef CONTROL_NODE_ID
 #define CONTROL_NODE_ID "node-control-001"
@@ -114,23 +112,107 @@ typedef struct control_command_message {
 
 static uint32_t controlCommandSeq = 0;
 static bool espNowReady = false;
+char commandTopic[64] = {0};
+char whitelistTopic[64] = {0};
 
 String getISOTimestamp();
 extern PubSubClient client;
 bool ensureEspNowReady();
 bool addControlNodePeer();
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len);
+void resetRuntimeWhitelist();
+void applyRuntimeWhitelist(JsonArrayConst nodes);
+void logCurrentWhitelist();
+void touchRuntimeWhitelist();
+void expireRuntimeWhitelistIfNeeded();
+bool isWhitelistTopic(const char* topic);
 
 bool isNodeWhitelisted(const char* nodeId) {
     if (!nodeId) {
         return false;
     }
-    for (size_t i = 0; i < allowed_node_count; i++) {
-        if (strcmp(allowed_node_ids[i], nodeId) == 0) {
+    if (!runtime_whitelist_active) {
+        return false;
+    }
+    for (size_t i = 0; i < runtime_whitelist_count; i++) {
+        if (strcmp(runtime_whitelist_nodes[i], nodeId) == 0) {
             return true;
         }
     }
     return false;
+}
+
+void resetRuntimeWhitelist() {
+    runtime_whitelist_count = 0;
+    runtime_whitelist_active = false;
+    runtime_whitelist_last_sync_ms = 0;
+}
+
+void touchRuntimeWhitelist() {
+    runtime_whitelist_last_sync_ms = millis();
+}
+
+void applyRuntimeWhitelist(JsonArrayConst nodes) {
+    runtime_whitelist_count = 0;
+    for (JsonVariantConst node : nodes) {
+        if (!node.is<const char*>()) {
+            continue;
+        }
+        const char* nodeId = node.as<const char*>();
+        if (!nodeId || strlen(nodeId) == 0) {
+            continue;
+        }
+        bool exists = false;
+        for (size_t i = 0; i < runtime_whitelist_count; i++) {
+            if (strcmp(runtime_whitelist_nodes[i], nodeId) == 0) {
+                exists = true;
+                break;
+            }
+        }
+        if (exists) {
+            continue;
+        }
+        if (runtime_whitelist_count >= MAX_RUNTIME_WHITELIST_NODES) {
+            break;
+        }
+        strncpy(runtime_whitelist_nodes[runtime_whitelist_count], nodeId, MAX_NODE_ID_LEN);
+        runtime_whitelist_nodes[runtime_whitelist_count][MAX_NODE_ID_LEN] = '\0';
+        runtime_whitelist_count++;
+    }
+    runtime_whitelist_active = true;
+    touchRuntimeWhitelist();
+}
+
+void logCurrentWhitelist() {
+    Serial.println("Current gateway whitelist:");
+    if (!runtime_whitelist_active) {
+        Serial.println("  (runtime) null");
+        return;
+    }
+    if (runtime_whitelist_count == 0) {
+        Serial.println("  (runtime) empty");
+        return;
+    }
+    for (size_t i = 0; i < runtime_whitelist_count; i++) {
+        Serial.printf("  (runtime) %s\n", runtime_whitelist_nodes[i]);
+    }
+}
+
+void expireRuntimeWhitelistIfNeeded() {
+    if (!runtime_whitelist_active) {
+        return;
+    }
+    if (millis() - runtime_whitelist_last_sync_ms < RUNTIME_WHITELIST_TTL_MS) {
+        return;
+    }
+
+    resetRuntimeWhitelist();
+    Serial.println("Runtime whitelist expired after 60s without successful sync. Cleared to null.");
+    logCurrentWhitelist();
+}
+
+bool isWhitelistTopic(const char* topic) {
+    return topic && whitelistTopic[0] != '\0' && strcmp(topic, whitelistTopic) == 0;
 }
 
 bool isControlNode(const char* nodeId) {
@@ -436,6 +518,9 @@ bool connectMqttOnce() {
     if (!ensureWiFiConnected()) {
         return false;
     }
+    snprintf(commandTopic, sizeof(commandTopic), "esp32/commands/%s", gateway_id);
+    snprintf(whitelistTopic, sizeof(whitelistTopic), "esp32/whitelist/%s", gateway_id);
+
     Serial.print("Attempting MQTT connection...");
     String clientId = String(gateway_id) + "-" + String(random(0xffff), HEX);
 
@@ -443,10 +528,11 @@ bool connectMqttOnce() {
     if (client.connect(clientId.c_str(), gateway_id, gateway_secret)) {
         Serial.println("âœ“ MQTT Connected");
 
-        // Subscribe to command topic
-        String commandTopic = "esp32/commands/" + String(gateway_id);
-        client.subscribe(commandTopic.c_str());
-        Serial.println("âœ“ Subscribed to: " + commandTopic);
+        client.subscribe(commandTopic);
+        Serial.println(String("âœ“ Subscribed to: ") + commandTopic);
+        client.subscribe(whitelistTopic);
+        Serial.println(String("âœ“ Subscribed to: ") + whitelistTopic);
+        logCurrentWhitelist();
         return true;
     }
 
@@ -472,7 +558,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.print("Topic: ");
     Serial.println(topic);
     
-    StaticJsonDocument<300> doc;
+    StaticJsonDocument<1024> doc;
     DeserializationError error = deserializeJson(doc, payload, length);
     
     if (error) {
@@ -480,6 +566,33 @@ void callback(char* topic, byte* payload, unsigned int length) {
         return;
     }
     
+    if (isWhitelistTopic(topic)) {
+        if (doc.containsKey("gateway_id") &&
+            String((const char*)doc["gateway_id"]) != String(gateway_id)) {
+            Serial.println("Ignore whitelist update for another gateway");
+            return;
+        }
+
+        if (doc["reset"] == true) {
+            resetRuntimeWhitelist();
+            Serial.println("Runtime whitelist reset to null.");
+            logCurrentWhitelist();
+            return;
+        }
+
+        if (!doc["nodes"].is<JsonArrayConst>()) {
+            Serial.println("Invalid whitelist payload: nodes array missing");
+            return;
+        }
+
+        applyRuntimeWhitelist(doc["nodes"].as<JsonArrayConst>());
+        Serial.printf("Runtime whitelist updated. Node count: %u. TTL refreshed to %lu ms.\n",
+                      (unsigned int)runtime_whitelist_count,
+                      (unsigned long)RUNTIME_WHITELIST_TTL_MS);
+        logCurrentWhitelist();
+        return;
+    }
+
     // Check if command is for this gateway
     if (doc.containsKey("gateway_id") && 
         String((const char*)doc["gateway_id"]) != String(gateway_id)) {
@@ -706,6 +819,8 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+    resetRuntimeWhitelist();
+    Serial.println("Runtime whitelist initialized as null.");
     Serial.println("\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—");
     Serial.println("â•‘   IoT Gateway Starting...    â•‘");
     Serial.println("â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n");
@@ -801,6 +916,8 @@ void loop() {
     } else {
         client.loop();
     }
+
+    expireRuntimeWhitelistIfNeeded();
     
     // Heartbeat every 5 seconds
     static unsigned long lastHeartbeat = 0;
