@@ -922,8 +922,10 @@ void loop() {
     // Heartbeat every 5 seconds
     static unsigned long lastHeartbeat = 0;
     if (millis() - lastHeartbeat > 5000) {
-        StaticJsonDocument<200> heartbeat;
+        StaticJsonDocument<256> heartbeat;
         heartbeat["gateway_id"] = gateway_id;
+        heartbeat["gateway_ip"] = WiFi.localIP().toString();
+        heartbeat["gateway_mac"] = WiFi.macAddress();
         heartbeat["status"] = "online";
         heartbeat["uptime"] = millis() / 1000;
         heartbeat["timestamp"] = getISOTimestamp();
