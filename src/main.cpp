@@ -7,24 +7,10 @@
 #include "esp_wifi.h"
 #include <time.h>
 
-// WiFi & MQTT Config
-#if defined(WIFI_PROFILE_HOME)
-#define WIFI_SSID "Tien Thuat"
-#define WIFI_PASSWORD "07112004tien"
-#elif defined(WIFI_PROFILE_OFFICE)
-#define WIFI_SSID "OrsCorp"
-#define WIFI_PASSWORD "Tamchiduc68"
-#endif
-
-#ifndef WIFI_SSID
-#define WIFI_SSID "OrsCorp"
-#endif
-#ifndef WIFI_PASSWORD
-#define WIFI_PASSWORD "Tamchiduc68"
-#endif
-#ifndef MQTT_SERVER
-#define MQTT_SERVER "192.168.1.249"
-#endif
+// WiFi & MQTT Config (single fixed profile)
+#define WIFI_SSID "Khanh Hoa"
+#define WIFI_PASSWORD "phukhanh"
+#define MQTT_SERVER "192.168.100.102"
 
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
@@ -61,15 +47,17 @@ const uint8_t MSG_TYPE_HEARTBEAT = 2;
 // Relay control action
 const char* ACTION_RELAY_CONTROL = "relay_control";
 
-// Per-gateway node whitelist (edit per device)
-#if defined(GATEWAY_3)
-const char* allowed_node_ids[] = { "node-sensor-003" };
-#elif defined(GATEWAY_2)
-const char* allowed_node_ids[] = { "node-sensor-002" };
-#else
+// Per-gateway node whitelist
 const char* allowed_node_ids[] = { "node-sensor-001", "node-control-001" };
-#endif
 const size_t allowed_node_count = sizeof(allowed_node_ids) / sizeof(allowed_node_ids[0]);
+
+// Runtime whitelist (from MQTT)
+const size_t MAX_RUNTIME_NODES = 20;
+String runtime_node_ids[MAX_RUNTIME_NODES];
+size_t runtime_node_count = 0;
+bool runtime_whitelist_active = false;
+unsigned long last_whitelist_at_ms = 0;
+const unsigned long WHITELIST_TTL_MS = 60000;
 
 #ifndef CONTROL_NODE_ID
 #define CONTROL_NODE_ID "node-control-001"
@@ -125,6 +113,14 @@ bool isNodeWhitelisted(const char* nodeId) {
     if (!nodeId) {
         return false;
     }
+    if (runtime_whitelist_active) {
+        for (size_t i = 0; i < runtime_node_count; i++) {
+            if (runtime_node_ids[i].equals(nodeId)) {
+                return true;
+            }
+        }
+        return false;
+    }
     for (size_t i = 0; i < allowed_node_count; i++) {
         if (strcmp(allowed_node_ids[i], nodeId) == 0) {
             return true;
@@ -151,16 +147,11 @@ bool ensureEspNowReady() {
     esp_now_register_recv_cb(OnDataRecv);
     espNowReady = true;
 
-#ifndef GATEWAY_2
     addControlNodePeer();
-#endif
     return true;
 }
 
 bool addControlNodePeer() {
-#ifdef GATEWAY_2
-    return false;
-#else
     esp_now_peer_info_t peerInfo = {};
     memcpy(peerInfo.peer_addr, controlNodeAddress, 6);
     peerInfo.channel = 0;
@@ -178,7 +169,6 @@ bool addControlNodePeer() {
 
     Serial.println("Control-node peer ready");
     return true;
-#endif
 }
 
 void publishControlAck(const char* nodeId, const char* device, const char* state, const char* status) {
@@ -200,10 +190,6 @@ void publishControlAck(const char* nodeId, const char* device, const char* state
 }
 
 void sendControlCommandToNode(const char* targetNodeId, const char* device, const char* state) {
-#ifdef GATEWAY_2
-    Serial.println("Relay control ignored: gateway 2 has no control node");
-    publishControlAck(targetNodeId, device, state, "unsupported_gateway");
-#else
     if (!ensureEspNowReady()) {
         publishControlAck(targetNodeId, device, state, "espnow_not_ready");
         return;
@@ -245,7 +231,6 @@ void sendControlCommandToNode(const char* targetNodeId, const char* device, cons
         Serial.printf("Relay command send failed (%d)\n", result);
         publishControlAck(targetNodeId, device, state, "dispatch_failed");
     }
-#endif
 }
 
 // NTP Servers for timestamps (fallbacks)
@@ -441,16 +426,21 @@ bool connectMqttOnce() {
 
     // Authenticate with credentials
     if (client.connect(clientId.c_str(), gateway_id, gateway_secret)) {
-        Serial.println("âœ“ MQTT Connected");
+        Serial.println("OK MQTT Connected");
 
         // Subscribe to command topic
         String commandTopic = "esp32/commands/" + String(gateway_id);
         client.subscribe(commandTopic.c_str());
-        Serial.println("âœ“ Subscribed to: " + commandTopic);
+        Serial.println("OK Subscribed to: " + commandTopic);
+
+        // Subscribe to whitelist topic
+        String whitelistTopic = "esp32/whitelist/" + String(gateway_id);
+        client.subscribe(whitelistTopic.c_str());
+        Serial.println("OK Subscribed to: " + whitelistTopic);
         return true;
     }
 
-    Serial.print("âœ— Failed, rc=");
+    Serial.print("ERR Failed, rc=");
     Serial.print(client.state());
     Serial.println(" retry in 5s");
     return false;
@@ -468,6 +458,36 @@ void waitForMqtt(uint32_t timeoutMs = 30000) {
 
 // MQTT callback for incoming commands (Servo control)
 void callback(char* topic, byte* payload, unsigned int length) {
+    const String topicStr(topic);
+    const String whitelistTopic = String("esp32/whitelist/") + String(gateway_id);
+    if (topicStr == whitelistTopic) {
+        StaticJsonDocument<512> wlDoc;
+        DeserializationError wlError = deserializeJson(wlDoc, payload, length);
+        if (wlError) {
+            Serial.println("Whitelist JSON parse error");
+            return;
+        }
+
+        runtime_node_count = 0;
+        if (wlDoc.containsKey("nodes") && wlDoc["nodes"].is<JsonArray>()) {
+            JsonArray nodes = wlDoc["nodes"].as<JsonArray>();
+            for (JsonVariant node : nodes) {
+                if (!node.is<const char*>()) {
+                    continue;
+                }
+                if (runtime_node_count >= MAX_RUNTIME_NODES) {
+                    break;
+                }
+                runtime_node_ids[runtime_node_count++] = String(node.as<const char*>());
+            }
+        }
+
+        runtime_whitelist_active = true;
+        last_whitelist_at_ms = millis();
+        Serial.printf("Whitelist updated: %u nodes\n", (unsigned int)runtime_node_count);
+        return;
+    }
+
     Serial.println("\n=== Command Received ===");
     Serial.print("Topic: ");
     Serial.println(topic);
@@ -476,14 +496,14 @@ void callback(char* topic, byte* payload, unsigned int length) {
     DeserializationError error = deserializeJson(doc, payload, length);
     
     if (error) {
-        Serial.println("âœ— JSON parse error");
+        Serial.println("ERR JSON parse error");
         return;
     }
     
     // Check if command is for this gateway
     if (doc.containsKey("gateway_id") && 
         String((const char*)doc["gateway_id"]) != String(gateway_id)) {
-        Serial.println("âœ— Command not for this gateway");
+        Serial.println("ERR Command not for this gateway");
         return;
     }
     
@@ -496,7 +516,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
             int speed = doc["speed"] | 10; // Default speed 10
             String device_id = doc["device_id"] | "servo1";
             
-            Serial.printf("âœ“ Servo Control: Device=%s, Angle=%d, Speed=%d\n", 
+            Serial.printf("OK Servo Control: Device=%s, Angle=%d, Speed=%d\n", 
                          device_id.c_str(), target_angle, speed);
             
             // Apply speed control (optional - for smooth movement)
@@ -509,7 +529,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
             }
             myServo.write(target_angle); // Ensure exact position
             
-            Serial.println("âœ“ Servo moved successfully");
+            Serial.println("OK Servo moved successfully");
             
             // Send acknowledgment back to server
             StaticJsonDocument<200> ackDoc;
@@ -543,10 +563,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
     Serial.println("========================\n");
 }
-
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-// UPDATED: ESP-NOW callback - Enhanced JSON format
-// â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     Serial.println("\n=== ESP-NOW Data Received ===");
@@ -629,11 +645,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     Serial.printf("Rain: %d (%d%%)\n", myData.rain_raw, (int)myData.rain_percent);
     Serial.printf("Soil: %d (%d%%)\n", myData.soil_raw, (int)myData.soil_percent);
     Serial.printf("RSSI: %d dBm\n", myData.rssi);
-    
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    // Create ENHANCED JSON with all sensors
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    
+ 
     StaticJsonDocument<800> doc;
     
     // Gateway info
@@ -686,19 +698,19 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     String payload;
     serializeJson(doc, payload);
     
-    Serial.println("\nðŸ“¤ JSON Payload:");
+    Serial.println("\nJSON Payload:");
     Serial.println(payload);
     
     // Publish to MQTT with QoS 1
     if (client.connected()) {
         bool published = client.publish("esp32/sensors/data", payload.c_str(), true);
         if (published) {
-            Serial.println("âœ“ Published to MQTT");
+            Serial.println("OK Published to MQTT");
         } else {
-            Serial.println("âœ— MQTT publish failed");
+            Serial.println("ERR MQTT publish failed");
         }
     } else {
-        Serial.println("âœ— MQTT disconnected, will retry in loop");
+        Serial.println("ERR MQTT disconnected, will retry in loop");
     }
     Serial.println("=============================\n");
 }
@@ -706,9 +718,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
 void setup() {
     Serial.begin(115200);
     delay(1000);
-    Serial.println("\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—");
-    Serial.println("â•‘   IoT Gateway Starting...    â•‘");
-    Serial.println("â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n");
+    Serial.println("IoT Gateway Starting...");
     
     // WiFi Setup
     WiFi.mode(WIFI_STA);
@@ -724,7 +734,7 @@ void setup() {
     startWiFiAttempt();
 
     if (!ensureWiFiConnected(20000)) {
-        Serial.println("âœ— WiFi connection failed!");
+        Serial.println("ERR WiFi connection failed!");
         if (lastDisconnectReason != 0) {
             Serial.printf("  Last reason: %u (%s)\n",
                           lastDisconnectReason,
@@ -733,7 +743,7 @@ void setup() {
         return;
     }
 
-    Serial.println("âœ“ WiFi connected");
+    Serial.println("OK WiFi connected");
     Serial.print("  IP: ");
     Serial.println(WiFi.localIP());
     Serial.print("  Channel: ");
@@ -747,19 +757,19 @@ void setup() {
     // Initialize ESP-NOW after WiFi is up
     Serial.println("[2/6] Initializing ESP-NOW...");
     if (!ensureEspNowReady()) {
-        Serial.println("âœ— ESP-NOW init failed!");
+        Serial.println("ERR ESP-NOW init failed!");
         return;
     }
-    Serial.println("âœ“ ESP-NOW ready");
+    Serial.println("OK ESP-NOW ready");
     
     // Initialize NTP for timestamps
     Serial.println("[3/6] Syncing time with NTP...");
     if (syncTime()) {
-        Serial.println("âœ“ Time synchronized");
+        Serial.println("OK Time synchronized");
         Serial.print("  Current time: ");
         Serial.println(getISOTimestamp());
     } else {
-        Serial.println("âš  NTP sync failed, using millis()");
+        Serial.println("WARN NTP sync failed, using millis()");
     }
     
     // Setup MQTT
@@ -768,7 +778,7 @@ void setup() {
     client.setKeepAlive(60);
     client.setServer(mqtt_server, 1883);
     client.setCallback(callback);
-    Serial.println("âœ“ MQTT configured");
+    Serial.println("OK MQTT configured");
 
     client.setBufferSize(1024);
     
@@ -776,15 +786,13 @@ void setup() {
     Serial.println("[5/6] Initializing servo...");
     myServo.attach(18);
     myServo.write(90); // Center position
-    Serial.println("âœ“ Servo ready (pin 18, position 90Â°)");
+    Serial.println("OK Servo ready (pin 18, position 90 deg)");
     
     // Connect to MQTT
     Serial.println("[6/6] Connecting to MQTT broker...");
     waitForMqtt();
     
-    Serial.println("\nâ•”â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•—");
-    Serial.println("â•‘  Gateway Ready - ID: " + String(gateway_id) + "  â•‘");
-    Serial.println("â•šâ•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•\n");
+    Serial.println("Gateway Ready - ID: " + String(gateway_id));
 }
 
 void loop() {
@@ -800,6 +808,12 @@ void loop() {
         }
     } else {
         client.loop();
+    }
+
+    if (runtime_whitelist_active && (millis() - last_whitelist_at_ms > WHITELIST_TTL_MS)) {
+        runtime_whitelist_active = false;
+        runtime_node_count = 0;
+        Serial.println("Whitelist expired, fallback to static list");
     }
     
     // Heartbeat every 5 seconds
