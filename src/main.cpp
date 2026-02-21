@@ -288,6 +288,7 @@ typedef struct struct_message {
     uint8_t message_type;
     uint32_t uptime_sec;
     uint32_t heartbeat_seq;
+    char status_kv[96];
 } struct_message;
 
 struct_message myData;
@@ -297,6 +298,57 @@ String formatMac(const uint8_t *mac) {
     snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return String(buf);
+}
+
+void appendControllerState(JsonArray states, const char* device, const char* kind, const char* state) {
+    if (!device || !device[0]) {
+        return;
+    }
+    JsonObject item = states.createNestedObject();
+    item["device"] = device;
+    item["kind"] = (kind && kind[0]) ? kind : "digital";
+    item["state"] = (state && state[0]) ? state : "unknown";
+}
+
+void parseControllerStatus(const char* kv, JsonArray states) {
+    if (!kv || !kv[0]) {
+        return;
+    }
+
+    char buffer[96];
+    strncpy(buffer, kv, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    const char* device = nullptr;
+    const char* kind = nullptr;
+    const char* state = nullptr;
+
+    char* token = strtok(buffer, ";");
+    while (token) {
+        char* eq = strchr(token, '=');
+        if (eq) {
+            *eq = '\0';
+            const char* key = token;
+            const char* value = eq + 1;
+            if (strcmp(key, "d") == 0) {
+                if (device) {
+                    appendControllerState(states, device, kind, state);
+                    kind = nullptr;
+                    state = nullptr;
+                }
+                device = value;
+            } else if (strcmp(key, "k") == 0) {
+                kind = value;
+            } else if (strcmp(key, "s") == 0) {
+                state = value;
+            }
+        }
+        token = strtok(nullptr, ";");
+    }
+
+    if (device) {
+        appendControllerState(states, device, kind, state);
+    }
 }
 
 const char* wifiDisconnectReasonToString(uint8_t reason) {
@@ -601,6 +653,11 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
         heartbeat["sensor_rssi"] = myData.rssi;
         heartbeat["gateway_timestamp"] = getISOTimestamp();
         heartbeat["sensor_timestamp"] = myData.sensor_timestamp;
+        if (controlNode) {
+            heartbeat["status_kv"] = myData.status_kv;
+            JsonArray controllerStates = heartbeat.createNestedArray("controller_states");
+            parseControllerStatus(myData.status_kv, controllerStates);
+        }
 
         String hbPayload;
         serializeJson(heartbeat, hbPayload);
