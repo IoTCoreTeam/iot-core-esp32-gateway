@@ -8,9 +8,9 @@
 #include <time.h>
 
 // WiFi & MQTT Config (single fixed profile)
-#define WIFI_SSID "Khanh Hoa"
-#define WIFI_PASSWORD "phukhanh"
-#define MQTT_SERVER "192.168.100.102"
+#define WIFI_SSID "OrsCorp"
+#define WIFI_PASSWORD "Tamchiduc68"
+#define MQTT_SERVER "192.168.1.249"
 
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
@@ -44,8 +44,9 @@ const char* node_name = NODE_NAME;
 const uint8_t MSG_TYPE_DATA = 1;
 const uint8_t MSG_TYPE_HEARTBEAT = 2;
 
-// Relay control action
+// Control action types
 const char* ACTION_RELAY_CONTROL = "relay_control";
+const char* ACTION_DIGITAL = "digital";
 
 // Per-gateway node whitelist
 const char* allowed_node_ids[] = { "node-sensor-001", "node-control-001" };
@@ -189,7 +190,7 @@ void publishControlAck(const char* nodeId, const char* device, const char* state
     client.publish("esp32/control/ack", ackPayload.c_str());
 }
 
-void sendControlCommandToNode(const char* targetNodeId, const char* device, const char* state) {
+void sendControlCommandToNode(const char* targetNodeId, const char* actionType, const char* device, const char* state) {
     if (!ensureEspNowReady()) {
         publishControlAck(targetNodeId, device, state, "espnow_not_ready");
         return;
@@ -212,7 +213,11 @@ void sendControlCommandToNode(const char* targetNodeId, const char* device, cons
     control_command_message command = {};
     strncpy(command.gateway_id, gateway_id, sizeof(command.gateway_id) - 1);
     strncpy(command.node_id, targetNodeId, sizeof(command.node_id) - 1);
-    strncpy(command.action_type, ACTION_RELAY_CONTROL, sizeof(command.action_type) - 1);
+    if (actionType && actionType[0]) {
+        strncpy(command.action_type, actionType, sizeof(command.action_type) - 1);
+    } else {
+        strncpy(command.action_type, ACTION_RELAY_CONTROL, sizeof(command.action_type) - 1);
+    }
     strncpy(command.device, device, sizeof(command.device) - 1);
     strncpy(command.state, state, sizeof(command.state) - 1);
     command.command_seq = ++controlCommandSeq;
@@ -594,23 +599,12 @@ void callback(char* topic, byte* payload, unsigned int length) {
             String ackPayload;
             serializeJson(ackDoc, ackPayload);
             client.publish("esp32/servo/ack", ackPayload.c_str());
-        } else if (action == ACTION_RELAY_CONTROL) {
+        } else if (action == ACTION_RELAY_CONTROL || action == ACTION_DIGITAL) {
             String device = doc["device"] | "";
             String state = doc["state"] | "";
             String targetNode = doc["node_id"] | CONTROL_NODE_ID;
 
-            if (device != "pump" && device != "light") {
-                Serial.println("relay_control invalid device");
-                publishControlAck(targetNode.c_str(), device.c_str(), state.c_str(), "invalid_device");
-                return;
-            }
-            if (state != "on" && state != "off") {
-                Serial.println("relay_control invalid state");
-                publishControlAck(targetNode.c_str(), device.c_str(), state.c_str(), "invalid_state");
-                return;
-            }
-
-            sendControlCommandToNode(targetNode.c_str(), device.c_str(), state.c_str());
+            sendControlCommandToNode(targetNode.c_str(), action.c_str(), device.c_str(), state.c_str());
         }
     }
     Serial.println("========================\n");
