@@ -702,10 +702,13 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     // Gateway info
     doc["gateway_id"] = gateway_id;
     doc["gateway_secret"] = gateway_secret;
+    doc["gateway_ip"] = WiFi.localIP().toString();
+    doc["gateway_mac"] = WiFi.macAddress();
     
     // Node info
     doc["node_id"] = myData.node_id;
     doc["node_name"] = "Sensor Node";
+    doc["node_mac"] = nodeMac;
     
     // Device info
     doc["sensor_id"] = myData.device_id;
@@ -872,6 +875,8 @@ void loop() {
     if (millis() - lastHeartbeat > 5000) {
         StaticJsonDocument<200> heartbeat;
         heartbeat["gateway_id"] = gateway_id;
+        heartbeat["gateway_ip"] = WiFi.localIP().toString();
+        heartbeat["gateway_mac"] = WiFi.macAddress();
         heartbeat["status"] = "online";
         heartbeat["uptime"] = millis() / 1000;
         heartbeat["timestamp"] = getISOTimestamp();
