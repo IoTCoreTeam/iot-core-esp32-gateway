@@ -43,6 +43,7 @@ const char* node_name = NODE_NAME;
 // Message types
 const uint8_t MSG_TYPE_DATA = 1;
 const uint8_t MSG_TYPE_HEARTBEAT = 2;
+const uint8_t MSG_TYPE_STATUS_EVENT = 3;
 
 // Control action types
 const char* ACTION_RELAY_CONTROL = "relay_control";
@@ -356,6 +357,93 @@ void parseControllerStatus(const char* kv, JsonArray states) {
     }
 }
 
+bool getStatusKvValue(const char* kv, const char* targetKey, char* out, size_t outSize) {
+    if (!kv || !targetKey || !out || outSize == 0) {
+        return false;
+    }
+
+    out[0] = '\0';
+    char buffer[96];
+    strncpy(buffer, kv, sizeof(buffer) - 1);
+    buffer[sizeof(buffer) - 1] = '\0';
+
+    char* token = strtok(buffer, ";");
+    while (token) {
+        char* eq = strchr(token, '=');
+        if (eq) {
+            *eq = '\0';
+            const char* key = token;
+            const char* value = eq + 1;
+            if (strcmp(key, targetKey) == 0) {
+                strncpy(out, value, outSize - 1);
+                out[outSize - 1] = '\0';
+                return true;
+            }
+        }
+        token = strtok(nullptr, ";");
+    }
+
+    return false;
+}
+
+void publishControllerStatusEvent(const struct_message& data, const String& nodeMac) {
+    if (!client.connected()) {
+        Serial.println("MQTT disconnected, controller status event not published");
+        return;
+    }
+
+    char commandSeq[16] = "";
+    char commandDevice[24] = "";
+    char commandTargetState[12] = "";
+    char commandResult[24] = "";
+
+    getStatusKvValue(data.status_kv, "cmd", commandSeq, sizeof(commandSeq));
+    getStatusKvValue(data.status_kv, "cd", commandDevice, sizeof(commandDevice));
+    getStatusKvValue(data.status_kv, "ct", commandTargetState, sizeof(commandTargetState));
+    getStatusKvValue(data.status_kv, "cr", commandResult, sizeof(commandResult));
+
+    StaticJsonDocument<512> eventDoc;
+    eventDoc["type"] = "controller_status_event";
+    eventDoc["gateway_id"] = gateway_id;
+    eventDoc["gateway_ip"] = WiFi.localIP().toString();
+    eventDoc["gateway_mac"] = WiFi.macAddress();
+    eventDoc["node_id"] = data.node_id;
+    eventDoc["node_mac"] = nodeMac;
+    eventDoc["sensor_id"] = data.device_id;
+    eventDoc["event_seq"] = data.heartbeat_seq;
+    eventDoc["sensor_rssi"] = data.rssi;
+    eventDoc["sensor_timestamp"] = data.sensor_timestamp;
+    eventDoc["gateway_timestamp"] = getISOTimestamp();
+    eventDoc["status_kv"] = data.status_kv;
+
+    if (commandSeq[0]) {
+        eventDoc["command_seq"] = strtoul(commandSeq, nullptr, 10);
+    }
+    if (commandDevice[0]) {
+        eventDoc["command_device"] = commandDevice;
+    }
+    if (commandTargetState[0]) {
+        eventDoc["command_state"] = commandTargetState;
+    }
+    if (commandResult[0]) {
+        eventDoc["command_result"] = commandResult;
+    }
+
+    JsonArray controllerStates = eventDoc.createNestedArray("controller_states");
+    parseControllerStatus(data.status_kv, controllerStates);
+
+    String payload;
+    serializeJson(eventDoc, payload);
+
+    const char* eventTopic = "esp32/controllers/status-event";
+    bool published = client.publish(eventTopic, payload.c_str(), false);
+    if (published) {
+        Serial.println("Controller status event published to MQTT");
+    } else {
+        Serial.println("Controller status event publish failed");
+    }
+}
+
 const char* wifiDisconnectReasonToString(uint8_t reason) {
     switch (reason) {
         case WIFI_REASON_AUTH_EXPIRE: return "AUTH_EXPIRE";
@@ -617,6 +705,23 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     int copyLen = len < (int)sizeof(myData) ? len : (int)sizeof(myData);
     memcpy(&myData, incomingData, copyLen);
     String nodeMac = formatMac(mac);
+
+    if (myData.message_type == MSG_TYPE_STATUS_EVENT) {
+        if (!isNodeWhitelisted(myData.node_id)) {
+            Serial.printf("Node status event from non-whitelisted node: %s\n", myData.node_id);
+            return;
+        }
+
+        if (!isControlNode(myData.node_id)) {
+            Serial.printf("Ignoring status event from non-control node: %s\n", myData.node_id);
+            return;
+        }
+
+        Serial.printf("Status event from control node: %s\n", myData.node_id);
+        publishControllerStatusEvent(myData, nodeMac);
+        Serial.println("=============================\n");
+        return;
+    }
 
     if (myData.message_type == MSG_TYPE_HEARTBEAT) {
         if (!isNodeWhitelisted(myData.node_id)) {
