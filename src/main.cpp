@@ -294,7 +294,7 @@ typedef struct struct_message {
     uint8_t message_type;
     uint32_t uptime_sec;
     uint32_t heartbeat_seq;
-    char status_kv[96];
+    char status_kv[128];
 } struct_message;
 
 struct_message myData;
@@ -393,11 +393,13 @@ void publishControllerStatusEvent(const struct_message& data, const String& node
     }
 
     char commandSeq[16] = "";
+    char commandExecMs[16] = "";
     char commandDevice[24] = "";
     char commandTargetState[12] = "";
     char commandResult[24] = "";
 
     getStatusKvValue(data.status_kv, "cmd", commandSeq, sizeof(commandSeq));
+    getStatusKvValue(data.status_kv, "ce", commandExecMs, sizeof(commandExecMs));
     getStatusKvValue(data.status_kv, "cd", commandDevice, sizeof(commandDevice));
     getStatusKvValue(data.status_kv, "ct", commandTargetState, sizeof(commandTargetState));
     getStatusKvValue(data.status_kv, "cr", commandResult, sizeof(commandResult));
@@ -418,6 +420,9 @@ void publishControllerStatusEvent(const struct_message& data, const String& node
 
     if (commandSeq[0]) {
         eventDoc["command_seq"] = strtoul(commandSeq, nullptr, 10);
+    }
+    if (commandExecMs[0]) {
+        eventDoc["command_exec_ms"] = strtoul(commandExecMs, nullptr, 10);
     }
     if (commandDevice[0]) {
         eventDoc["command_device"] = commandDevice;
