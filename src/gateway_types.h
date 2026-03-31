@@ -10,6 +10,7 @@ constexpr uint8_t MSG_TYPE_STATUS_EVENT = 3;
 typedef struct struct_message {
     char device_id[32];
     char node_id[32];
+    char node_type[16];
 
     // DHT11 data
     float temperature;

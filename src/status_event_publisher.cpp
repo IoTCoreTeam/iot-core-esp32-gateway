@@ -29,6 +29,7 @@ void publishControllerStatusEvent(PubSubClient& client, const char* gatewayId, c
     eventDoc["gateway_ip"] = WiFi.localIP().toString();
     eventDoc["gateway_mac"] = WiFi.macAddress();
     eventDoc["node_id"] = data.node_id;
+    eventDoc["node_type"] = data.node_type;
     eventDoc["node_mac"] = nodeMac;
     eventDoc["sensor_id"] = data.device_id;
     eventDoc["event_seq"] = data.heartbeat_seq;

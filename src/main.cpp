@@ -158,6 +158,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     int copyLen = len < (int)sizeof(myData) ? len : (int)sizeof(myData);
     memcpy(&myData, incomingData, copyLen);
     String nodeMac = formatMac(mac);
+    const bool controlNode = strcmp(myData.node_type, "node-control") == 0;
 
     if (myData.message_type == MSG_TYPE_STATUS_EVENT) {
         if (!isNodeWhitelisted(myData.node_id)) {
@@ -165,7 +166,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
             return;
         }
 
-        if (!isControlNode(myData.node_id)) {
+        if (!controlNode) {
             Serial.printf("Ignoring status event from non-control node: %s\n", myData.node_id);
             return;
         }
@@ -180,7 +181,6 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
         if (!isNodeWhitelisted(myData.node_id)) {
             Serial.printf("Node heartbeat from non-whitelisted node: %s\n", myData.node_id);
         }
-        const bool controlNode = isControlNode(myData.node_id);
         const char* heartbeatTopic = controlNode
             ? "esp32/controllers/heartbeat"
             : "esp32/nodes/heartbeat";
@@ -197,6 +197,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
         heartbeat["gateway_mac"] = WiFi.macAddress();
         heartbeat["node_id"] = myData.node_id;
         heartbeat["node_name"] = controlNode ? "Control Node" : "Sensor Node";
+        heartbeat["node_type"] = myData.node_type[0] ? myData.node_type : "node";
         heartbeat["node_mac"] = nodeMac;
         heartbeat["sensor_id"] = myData.device_id;
         heartbeat["status"] = "online";
@@ -234,7 +235,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
         return;
     }
 
-    if (isControlNode(myData.node_id)) {
+    if (controlNode) {
         Serial.printf("Ignoring non-heartbeat payload from control node: %s\n", myData.node_id);
         return;
     }
@@ -266,6 +267,7 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     // Node info
     doc["node_id"] = myData.node_id;
     doc["node_name"] = "Sensor Node";
+    doc["node_type"] = myData.node_type[0] ? myData.node_type : "node";
     doc["node_mac"] = nodeMac;
     
     // Device info
