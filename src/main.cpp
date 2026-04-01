@@ -5,12 +5,13 @@
 #include <Arduino.h>
 #include "esp_wifi.h"
 
-#include "espnow_control.h"
-#include "gateway_helpers.h"
-#include "gateway_types.h"
-#include "node_whitelist.h"
-#include "status_event_publisher.h"
-#include "wifi_mqtt_manager.h"
+#include "lib/espnow_control.h"
+#include "lib/gateway_helpers.h"
+#include "lib/gateway_reachability_ack.h"
+#include "lib/gateway_types.h"
+#include "lib/node_whitelist.h"
+#include "lib/status_event_publisher.h"
+#include "lib/wifi_mqtt_manager.h"
 
 // WiFi & MQTT Config (single fixed profile)
 #define WIFI_SSID "OrsCorp"
@@ -153,6 +154,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
 void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     Serial.println("\n=== ESP-NOW Data Received ===");
+
+    if (handleReachabilityMessage(mac, incomingData, len, gateway_id, WiFi.RSSI())) {
+        return;
+    }
     
     memset(&myData, 0, sizeof(myData));
     int copyLen = len < (int)sizeof(myData) ? len : (int)sizeof(myData);
