@@ -36,10 +36,17 @@ typedef struct control_command_message {
     char action_type[24];
     char device[16];
     char state[8];
+    char direction[12];
     uint32_t command_seq;
 } control_command_message;
 
-static uint8_t controlNodeAddress[] = {
+typedef struct control_node_peer_entry {
+    bool used;
+    char node_id[32];
+    uint8_t mac[6];
+} control_node_peer_entry;
+
+static uint8_t defaultControlNodeAddress[] = {
     CONTROL_NODE_MAC_0,
     CONTROL_NODE_MAC_1,
     CONTROL_NODE_MAC_2,
@@ -48,18 +55,25 @@ static uint8_t controlNodeAddress[] = {
     CONTROL_NODE_MAC_5
 };
 
+static constexpr size_t MAX_CONTROL_NODE_PEERS = 16;
+static control_node_peer_entry controlNodePeers[MAX_CONTROL_NODE_PEERS] = {};
+
 static uint32_t controlCommandSeq = 0;
 static bool espNowReady = false;
 static esp_now_recv_cb_t espNowRecvCallback = nullptr;
 
-static bool addControlNodePeer() {
+static bool addControlNodePeer(const uint8_t* macAddress) {
+    if (!macAddress) {
+        return false;
+    }
+
     esp_now_peer_info_t peerInfo = {};
-    memcpy(peerInfo.peer_addr, controlNodeAddress, 6);
+    memcpy(peerInfo.peer_addr, macAddress, 6);
     peerInfo.channel = 0;
     peerInfo.encrypt = false;
     peerInfo.ifidx = WIFI_IF_STA;
 
-    if (esp_now_is_peer_exist(controlNodeAddress)) {
+    if (esp_now_is_peer_exist(macAddress)) {
         return true;
     }
 
@@ -70,6 +84,59 @@ static bool addControlNodePeer() {
 
     Serial.println("Control-node peer ready");
     return true;
+}
+
+static bool lookupControlNodePeer(const char* nodeId, uint8_t* outMac) {
+    if (!nodeId || !nodeId[0] || !outMac) {
+        return false;
+    }
+
+    for (size_t i = 0; i < MAX_CONTROL_NODE_PEERS; ++i) {
+        if (!controlNodePeers[i].used) {
+            continue;
+        }
+        if (strncmp(controlNodePeers[i].node_id, nodeId, sizeof(controlNodePeers[i].node_id)) != 0) {
+            continue;
+        }
+        memcpy(outMac, controlNodePeers[i].mac, 6);
+        return true;
+    }
+
+    return false;
+}
+
+void registerControlNodePeer(const char* nodeId, const uint8_t* mac) {
+    if (!nodeId || !nodeId[0] || !mac) {
+        return;
+    }
+
+    for (size_t i = 0; i < MAX_CONTROL_NODE_PEERS; ++i) {
+        if (!controlNodePeers[i].used) {
+            continue;
+        }
+        if (strncmp(controlNodePeers[i].node_id, nodeId, sizeof(controlNodePeers[i].node_id)) == 0) {
+            memcpy(controlNodePeers[i].mac, mac, 6);
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < MAX_CONTROL_NODE_PEERS; ++i) {
+        if (controlNodePeers[i].used) {
+            continue;
+        }
+        controlNodePeers[i].used = true;
+        strncpy(controlNodePeers[i].node_id, nodeId, sizeof(controlNodePeers[i].node_id) - 1);
+        controlNodePeers[i].node_id[sizeof(controlNodePeers[i].node_id) - 1] = '\0';
+        memcpy(controlNodePeers[i].mac, mac, 6);
+        return;
+    }
+
+    // FIFO replacement when table is full.
+    memmove(&controlNodePeers[0], &controlNodePeers[1], sizeof(control_node_peer_entry) * (MAX_CONTROL_NODE_PEERS - 1));
+    controlNodePeers[MAX_CONTROL_NODE_PEERS - 1].used = true;
+    strncpy(controlNodePeers[MAX_CONTROL_NODE_PEERS - 1].node_id, nodeId, sizeof(controlNodePeers[MAX_CONTROL_NODE_PEERS - 1].node_id) - 1);
+    controlNodePeers[MAX_CONTROL_NODE_PEERS - 1].node_id[sizeof(controlNodePeers[MAX_CONTROL_NODE_PEERS - 1].node_id) - 1] = '\0';
+    memcpy(controlNodePeers[MAX_CONTROL_NODE_PEERS - 1].mac, mac, 6);
 }
 
 void setEspNowRecvCallback(esp_now_recv_cb_t callback) {
@@ -89,7 +156,7 @@ bool ensureEspNowReady() {
     }
     espNowReady = true;
 
-    addControlNodePeer();
+    addControlNodePeer(defaultControlNodeAddress);
     return true;
 }
 
@@ -128,7 +195,9 @@ void sendControlCommandToNode(
     const char* targetNodeId,
     const char* actionType,
     const char* device,
-    const char* state
+    const char* state,
+    const char* direction,
+    uint32_t commandSeq
 ) {
     if (!espNowReady && !ensureEspNowReady()) {
         publishControlAck(client, gatewayId, targetNodeId, device, state, "espnow_not_ready");
@@ -138,13 +207,19 @@ void sendControlCommandToNode(
     if (!targetNodeId || strlen(targetNodeId) == 0) {
         targetNodeId = CONTROL_NODE_ID;
     }
-    if (strcmp(targetNodeId, CONTROL_NODE_ID) != 0) {
-        Serial.printf("Relay control ignored: node mismatch %s\n", targetNodeId);
-        publishControlAck(client, gatewayId, targetNodeId, device, state, "node_mismatch");
-        return;
+
+    uint8_t targetAddress[6] = {};
+    if (!lookupControlNodePeer(targetNodeId, targetAddress)) {
+        if (strcmp(targetNodeId, CONTROL_NODE_ID) == 0) {
+            memcpy(targetAddress, defaultControlNodeAddress, sizeof(targetAddress));
+        } else {
+            Serial.printf("Relay control ignored: unknown node %s\n", targetNodeId);
+            publishControlAck(client, gatewayId, targetNodeId, device, state, "node_not_found");
+            return;
+        }
     }
 
-    if (!addControlNodePeer()) {
+    if (!addControlNodePeer(targetAddress)) {
         publishControlAck(client, gatewayId, targetNodeId, device, state, "peer_add_failed");
         return;
     }
@@ -159,20 +234,28 @@ void sendControlCommandToNode(
     }
     strncpy(command.device, device, sizeof(command.device) - 1);
     strncpy(command.state, state, sizeof(command.state) - 1);
-    command.command_seq = ++controlCommandSeq;
+    if (direction && direction[0]) {
+        strncpy(command.direction, direction, sizeof(command.direction) - 1);
+    }
+    if (commandSeq > 0) {
+        command.command_seq = commandSeq;
+    } else {
+        command.command_seq = ++controlCommandSeq;
+    }
 
     esp_err_t result = esp_now_send(
-        controlNodeAddress,
+        targetAddress,
         reinterpret_cast<const uint8_t*>(&command),
         sizeof(command)
     );
 
     if (result == ESP_OK) {
         Serial.printf(
-            "Relay command sent: node=%s device=%s state=%s seq=%lu\n",
+            "Relay command sent: node=%s device=%s state=%s direction=%s seq=%lu\n",
             targetNodeId,
             device,
             state,
+            command.direction,
             (unsigned long)command.command_seq
         );
         publishControlAck(client, gatewayId, targetNodeId, device, state, "dispatched");

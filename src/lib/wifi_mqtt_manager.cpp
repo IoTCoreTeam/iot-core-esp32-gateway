@@ -15,6 +15,33 @@ static uint8_t lastDisconnectReason = 0;
 static unsigned long lastMqttAttemptMs = 0;
 static OnWifiDisconnectedFn onWifiDisconnectedHook = nullptr;
 
+static const char* mqttStateToString(int8_t state) {
+    switch (state) {
+        case MQTT_CONNECTION_TIMEOUT:
+            return "connection timeout";
+        case MQTT_CONNECTION_LOST:
+            return "connection lost";
+        case MQTT_CONNECT_FAILED:
+            return "tcp connect failed";
+        case MQTT_DISCONNECTED:
+            return "disconnected";
+        case MQTT_CONNECTED:
+            return "connected";
+        case MQTT_CONNECT_BAD_PROTOCOL:
+            return "bad protocol";
+        case MQTT_CONNECT_BAD_CLIENT_ID:
+            return "bad client id";
+        case MQTT_CONNECT_UNAVAILABLE:
+            return "broker unavailable";
+        case MQTT_CONNECT_BAD_CREDENTIALS:
+            return "bad credentials";
+        case MQTT_CONNECT_UNAUTHORIZED:
+            return "unauthorized";
+        default:
+            return "unknown";
+    }
+}
+
 static void onWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
     switch (event) {
         case ARDUINO_EVENT_WIFI_STA_CONNECTED:
@@ -155,9 +182,12 @@ bool connectMqttOnce(
         return true;
     }
 
+    int8_t state = client.state();
     Serial.print("ERR Failed, rc=");
-    Serial.print(client.state());
-    Serial.println(" retry in 5s");
+    Serial.print(state);
+    Serial.print(" (");
+    Serial.print(mqttStateToString(state));
+    Serial.println(") retry in 5s");
     return false;
 }
 

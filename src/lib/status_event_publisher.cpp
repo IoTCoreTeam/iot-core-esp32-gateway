@@ -16,15 +16,19 @@ void publishControllerStatusEvent(PubSubClient& client, const char* gatewayId, c
     char commandDevice[24] = "";
     char commandTargetState[12] = "";
     char commandResult[24] = "";
+    char commandDirection[16] = "";
 
     getStatusKvValue(data.status_kv, "cmd", commandSeq, sizeof(commandSeq));
     getStatusKvValue(data.status_kv, "ce", commandExecMs, sizeof(commandExecMs));
     getStatusKvValue(data.status_kv, "cd", commandDevice, sizeof(commandDevice));
     getStatusKvValue(data.status_kv, "ct", commandTargetState, sizeof(commandTargetState));
     getStatusKvValue(data.status_kv, "cr", commandResult, sizeof(commandResult));
+    getStatusKvValue(data.status_kv, "mv", commandDirection, sizeof(commandDirection));
 
-    StaticJsonDocument<512> eventDoc;
-    eventDoc["type"] = "controller_status_event";
+    StaticJsonDocument<640> eventDoc;
+    eventDoc["type"] = "control";
+    eventDoc["event_type"] = "controller_status_event";
+    eventDoc["input_type"] = "json_command";
     eventDoc["gateway_id"] = gatewayId;
     eventDoc["gateway_ip"] = WiFi.localIP().toString();
     eventDoc["gateway_mac"] = WiFi.macAddress();
@@ -36,6 +40,7 @@ void publishControllerStatusEvent(PubSubClient& client, const char* gatewayId, c
     eventDoc["sensor_rssi"] = data.rssi;
     eventDoc["sensor_timestamp"] = data.sensor_timestamp;
     eventDoc["gateway_timestamp"] = getISOTimestamp();
+    eventDoc["gps"] = nullptr;
     eventDoc["status_kv"] = data.status_kv;
 
     if (commandSeq[0]) {
@@ -52,6 +57,10 @@ void publishControllerStatusEvent(PubSubClient& client, const char* gatewayId, c
     }
     if (commandResult[0]) {
         eventDoc["command_result"] = commandResult;
+    }
+    if (commandDirection[0]) {
+        eventDoc["command_direction"] = commandDirection;
+        eventDoc["command_value"] = commandDirection;
     }
 
     JsonArray controllerStates = eventDoc.createNestedArray("controller_states");

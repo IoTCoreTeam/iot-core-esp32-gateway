@@ -14,13 +14,19 @@
 #include "lib/wifi_mqtt_manager.h"
 
 // WiFi & MQTT Config (single fixed profile)
-#define WIFI_SSID "OrsCorp"
-#define WIFI_PASSWORD "Tamchiduc68"
-#define MQTT_SERVER "192.168.1.249"
+#define WIFI_SSID "Khanh Hoa"
+#define WIFI_PASSWORD "phukhanh"
+#ifndef MQTT_SERVER
+#define MQTT_SERVER "192.168.100.102"
+#endif
+#ifndef WINDOWS_HOST_IP
+#define WINDOWS_HOST_IP "192.168.100.102"
+#endif
 
 const char* ssid = WIFI_SSID;
 const char* password = WIFI_PASSWORD;
 const char* mqtt_server = MQTT_SERVER;
+const char* windows_host_ip = WINDOWS_HOST_IP;
 
 // Security: Gateway Credentials
 #ifndef GATEWAY_ID
@@ -33,9 +39,7 @@ const char* mqtt_server = MQTT_SERVER;
 const char* gateway_id = GATEWAY_ID;
 const char* gateway_secret = GATEWAY_SECRET; // Change this!
 
-// ESP32 Gateway - Updated Ä‘á»ƒ gá»­i node_id trong payload
 
-// THÃŠM: Node configuration
 #ifndef NODE_ID
 #define NODE_ID "node-sensor-001"
 #endif
@@ -84,7 +88,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     Serial.print("Topic: ");
     Serial.println(topic);
     
-    StaticJsonDocument<300> doc;
+    StaticJsonDocument<800> doc;
     DeserializationError error = deserializeJson(doc, payload, length);
     
     if (error) {
@@ -138,6 +142,55 @@ void callback(char* topic, byte* payload, unsigned int length) {
             String device = doc["device"] | "";
             String state = doc["state"] | "";
             String targetNode = doc["node_id"] | "";
+            String direction = "";
+            uint32_t commandSeq = doc["command_seq"] | 0;
+
+            if (device.equalsIgnoreCase("robot")) {
+                JsonVariant commandPayload = doc["command_payload"];
+                if (!commandPayload.is<JsonObjectConst>()) {
+                    Serial.println("Robot command ignored: missing command_payload object");
+                    return;
+                }
+
+                const char* directionRaw = commandPayload["direction"] | "";
+                if (!directionRaw || directionRaw[0] == '\0') {
+                    Serial.println("Robot command ignored: missing command_payload.direction");
+                    return;
+                }
+
+                direction = String(directionRaw);
+                direction.toLowerCase();
+                if (
+                    direction != "forward" &&
+                    direction != "backward" &&
+                    direction != "left" &&
+                    direction != "right" &&
+                    direction != "stop"
+                ) {
+                    Serial.printf("Robot command ignored: invalid command_payload.direction=%s\n", direction.c_str());
+                    return;
+                }
+
+                const char* valueRaw = commandPayload["value"] | "";
+                if (!valueRaw || valueRaw[0] == '\0') {
+                    Serial.println("Robot command ignored: missing command_payload.value");
+                    return;
+                }
+
+                String value = String(valueRaw);
+                value.toLowerCase();
+                if (
+                    value != "on" &&
+                    value != "off"
+                ) {
+                    Serial.printf("Robot command ignored: invalid command_payload.value=%s\n", value.c_str());
+                    return;
+                }
+
+                state = value;
+                direction = String(directionRaw);
+                direction.toLowerCase();
+            }
 
             sendControlCommandToNode(
                 client,
@@ -145,7 +198,9 @@ void callback(char* topic, byte* payload, unsigned int length) {
                 targetNode.c_str(),
                 action.c_str(),
                 device.c_str(),
-                state.c_str()
+                state.c_str(),
+                direction.c_str(),
+                commandSeq
             );
         }
     }
@@ -164,6 +219,9 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
     memcpy(&myData, incomingData, copyLen);
     String nodeMac = formatMac(mac);
     const bool controlNode = strcmp(myData.node_type, "node-control") == 0;
+    if (controlNode) {
+        registerControlNodePeer(myData.node_id, mac);
+    }
 
     if (myData.message_type == MSG_TYPE_STATUS_EVENT) {
         if (!isNodeWhitelisted(myData.node_id)) {
@@ -195,8 +253,13 @@ void OnDataRecv(const uint8_t *mac, const uint8_t *incomingData, int len) {
         Serial.printf("  Uptime: %lu s\n", (unsigned long)myData.uptime_sec);
         Serial.printf("  RSSI: %d dBm\n", myData.rssi);
 
-        StaticJsonDocument<300> heartbeat;
-        heartbeat["type"] = "node_heartbeat";
+        StaticJsonDocument<512> heartbeat;
+        heartbeat["type"] = controlNode ? "control" : "node_heartbeat";
+        if (controlNode) {
+            heartbeat["event_type"] = "node_heartbeat";
+            heartbeat["input_type"] = "json_command";
+            heartbeat["gps"] = nullptr;
+        }
         heartbeat["gateway_id"] = gateway_id;
         heartbeat["gateway_ip"] = WiFi.localIP().toString();
         heartbeat["gateway_mac"] = WiFi.macAddress();
@@ -403,6 +466,8 @@ void setup() {
     client.setServer(mqtt_server, 1883);
     client.setCallback(callback);
     Serial.println("OK MQTT configured");
+    Serial.printf("  Broker: %s:%d\n", mqtt_server, 1883);
+    Serial.printf("  Windows host IP: %s\n", windows_host_ip);
 
     client.setBufferSize(1024);
     

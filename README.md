@@ -4,7 +4,7 @@ ESP32 gateway firmware for GW_001 / GW_002 / GW_003.
 
 ## Environments
 
-Office WiFi (`OrsCorp`):
+Office WiFi (`Khanh Hoa`):
 - `gateway1` -> `GW_001`
 - `gateway2` -> `GW_002`
 - `gateway3` -> `GW_003`

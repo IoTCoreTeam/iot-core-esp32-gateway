@@ -8,13 +8,16 @@
 void setEspNowRecvCallback(esp_now_recv_cb_t callback);
 bool ensureEspNowReady();
 void markEspNowNotReady();
+void registerControlNodePeer(const char* nodeId, const uint8_t* mac);
 void sendControlCommandToNode(
     PubSubClient& client,
     const char* gatewayId,
     const char* targetNodeId,
     const char* actionType,
     const char* device,
-    const char* state
+    const char* state,
+    const char* direction = nullptr,
+    uint32_t commandSeq = 0
 );
 
 #endif
